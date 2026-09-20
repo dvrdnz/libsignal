@@ -33,6 +33,7 @@ use libsignal_net_chat::api::backups::{BackupAuthCredentialRejected, GetUploadFo
 use libsignal_net_chat::api::messages::UploadTooLarge;
 use libsignal_net_chat::api::{RateLimitChallenge, RequestError as ChatRequestError};
 use libsignal_net_chat::grpc::devices::DeviceIdNotFoundInAccount;
+use libsignal_net_chat::grpc::login_purchase::ReceiptCredentialError;
 use libsignal_net_chat::grpc::usernames::UsernameNotAvailable;
 use libsignal_protocol::*;
 use signal_crypto::Error as SignalCryptoError;
@@ -67,9 +68,6 @@ pub use futures::*;
 
 mod io;
 pub use io::*;
-
-mod storage;
-pub use storage::*;
 
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(transparent)]
@@ -116,7 +114,7 @@ macro_rules! jni_custom_spellings {
                 $kt_spelling.to_string()
             }
         }
-        impl<'a> From<$ident<'a>> for ::jni::JValueOwned<'a> {
+        impl<'a> From<$ident<'a>> for ::jni::objects::JObject<'a> {
             fn from(value: $ident<'a>) -> Self {
                 value.0.into()
             }
@@ -352,40 +350,26 @@ impl JniError for IllegalArgumentError {
     }
 }
 
-impl JniError for GetUploadFormFailure {
-    fn to_throwable_impl<'a>(
-        &self,
-        env: &mut jni::Env<'a>,
-    ) -> Result<JObject<'a>, BridgeLayerError> {
-        make_single_message_throwable(
-            env,
-            self.to_string(),
-            match self {
-                GetUploadFormFailure::Unauthorized => {
-                    ClassName("org.signal.libsignal.net.RequestUnauthorizedException")
-                }
-                GetUploadFormFailure::UploadTooLarge => {
-                    ClassName("org.signal.libsignal.net.UploadTooLargeException")
-                }
-            },
-        )
+impl MessageOnlyExceptionJniError for GetUploadFormFailure {
+    fn exception_class(&self) -> ClassName<'static> {
+        match self {
+            GetUploadFormFailure::Unauthorized => {
+                ClassName("org.signal.libsignal.net.RequestUnauthorizedException")
+            }
+            GetUploadFormFailure::UploadTooLarge => {
+                ClassName("org.signal.libsignal.net.UploadTooLargeException")
+            }
+        }
     }
 }
 
-impl JniError for UploadTooLarge {
-    fn to_throwable_impl<'a>(
-        &self,
-        env: &mut jni::Env<'a>,
-    ) -> Result<JObject<'a>, BridgeLayerError> {
-        make_single_message_throwable(
-            env,
-            self.to_string(),
-            ClassName("org.signal.libsignal.net.UploadTooLargeException"),
-        )
+impl MessageOnlyExceptionJniError for UploadTooLarge {
+    fn exception_class(&self) -> ClassName<'static> {
+        ClassName("org.signal.libsignal.net.UploadTooLargeException")
     }
 }
 
-impl JniError for BackupAuthCredentialRejected {
+impl JniError for ReceiptCredentialError {
     fn to_throwable_impl<'a>(
         &self,
         env: &mut jni::Env<'a>,
@@ -393,8 +377,53 @@ impl JniError for BackupAuthCredentialRejected {
         make_single_message_throwable(
             env,
             self.to_string(),
-            ClassName("org.signal.libsignal.net.RequestUnauthorizedException"),
+            ClassName(match self {
+                ReceiptCredentialError::PaymentStillProcessing => {
+                    "org.signal.libsignal.net.CreateLoginReceiptCredentialException$PaymentStillProcessing"
+                }
+                ReceiptCredentialError::PaymentNotFound => {
+                    "org.signal.libsignal.net.CreateLoginReceiptCredentialException$PaymentNotFound"
+                }
+                ReceiptCredentialError::ReceiptAlreadyIssued => {
+                    "org.signal.libsignal.net.CreateLoginReceiptCredentialException$ReceiptAlreadyIssued"
+                }
+                ReceiptCredentialError::PaymentRequired { charge_failure } => {
+                    let message = new_jstring_from_owned_utf8(env, self.to_string())?;
+                    let charge_failure = charge_failure
+                        .clone()
+                        .map(|cf| cf.convert_into(env))
+                        .transpose()?
+                        .unwrap_or_default();
+                    return new_instance(
+                        env,
+                        ClassName(
+                            "org.signal.libsignal.net.CreateLoginReceiptCredentialException$PaymentRequired",
+                        ),
+                        jni_args!((
+                            message => java.lang.String,
+                            charge_failure => org.signal.libsignal.net.ChargeFailure,
+                        ) -> void),
+                    );
+                }
+            }),
         )
+    }
+}
+#[cfg(feature = "metadata")]
+#[linkme::distributed_slice(crate::metadata::jni::JNI_ITEMS)]
+static _FORCE_CHARGE_FAILURE_CONVERTER_TO_BE_EMITTED: crate::metadata::FnWithModule<
+    crate::metadata::jni::KtMetadataContext,
+> = crate::metadata::FnWithModule {
+    module_path: module_path!(),
+    apply: |ctx| {
+        use libsignal_net_chat::grpc::login_purchase::ChargeFailure;
+        ChargeFailure::register_kt_result_converter(ctx);
+    },
+};
+
+impl MessageOnlyExceptionJniError for BackupAuthCredentialRejected {
+    fn exception_class(&self) -> ClassName<'static> {
+        ClassName("org.signal.libsignal.net.RequestUnauthorizedException")
     }
 }
 
@@ -879,17 +908,12 @@ mod registration {
         }
     }
 
-    impl JniError for UpdateSessionError {
-        fn to_throwable_impl<'a>(
-            &self,
-            env: &mut jni::Env<'a>,
-        ) -> Result<JObject<'a>, BridgeLayerError> {
+    impl MessageOnlyExceptionJniError for UpdateSessionError {
+        fn exception_class(&self) -> ClassName<'static> {
             match self {
-                UpdateSessionError::Rejected => make_single_message_throwable(
-                    env,
-                    self.to_string(),
-                    ClassName("org.signal.libsignal.net.RegistrationException"),
-                ),
+                UpdateSessionError::Rejected => {
+                    ClassName("org.signal.libsignal.net.RegistrationException")
+                }
             }
         }
     }
@@ -1005,6 +1029,21 @@ mod registration {
                 RegisterAccountError::RegistrationRecoveryVerificationFailed => {
                     ClassName("org.signal.libsignal.net.RegistrationRecoveryFailedException")
                 }
+                RegisterAccountError::RequestRejected => {
+                    ClassName("org.signal.libsignal.net.RegisterAccountRequestRejectedException")
+                }
+                RegisterAccountError::InvalidSession => {
+                    ClassName("org.signal.libsignal.net.RegistrationInvalidSessionException")
+                }
+                RegisterAccountError::InvalidReceipt => {
+                    ClassName("org.signal.libsignal.net.RegistrationInvalidReceiptException")
+                }
+                RegisterAccountError::RecoveryPasswordRequired => ClassName(
+                    "org.signal.libsignal.net.RegistrationRecoveryPasswordRequiredException",
+                ),
+                RegisterAccountError::OneTimePasswordRequired => ClassName(
+                    "org.signal.libsignal.net.RegistrationOneTimePasswordRequiredException",
+                ),
             };
 
             make_single_message_throwable(env, self.to_string(), class_name)
@@ -1307,31 +1346,15 @@ impl JniError for libsignal_net_chat::api::messages::MultiRecipientSendFailure {
     }
 }
 
-impl JniError for DeviceIdNotFoundInAccount {
-    fn to_throwable_impl<'a>(
-        &self,
-        env: &mut jni::Env<'a>,
-    ) -> Result<JObject<'a>, BridgeLayerError> {
-        let message = self.to_string();
-        make_single_message_throwable(
-            env,
-            message,
-            ClassName("org.signal.libsignal.net.DeviceIdNotFoundException"),
-        )
+impl MessageOnlyExceptionJniError for DeviceIdNotFoundInAccount {
+    fn exception_class(&self) -> ClassName<'static> {
+        ClassName("org.signal.libsignal.net.DeviceIdNotFoundException")
     }
 }
 
-impl JniError for UsernameNotAvailable {
-    fn to_throwable_impl<'a>(
-        &self,
-        env: &mut jni::Env<'a>,
-    ) -> Result<JObject<'a>, BridgeLayerError> {
-        let message = self.to_string();
-        make_single_message_throwable(
-            env,
-            message,
-            ClassName("org.signal.libsignal.net.UsernameNotAvailableException"),
-        )
+impl MessageOnlyExceptionJniError for UsernameNotAvailable {
+    fn exception_class(&self) -> ClassName<'static> {
+        ClassName("org.signal.libsignal.net.UsernameNotAvailableException")
     }
 }
 
@@ -1398,23 +1421,26 @@ impl JniError for libsignal_net_chat::api::messages::UnsealedSendFailure {
     }
 }
 
-impl JniError for libsignal_net_chat::api::keys::GetPreKeysFailure {
-    fn to_throwable_impl<'a>(
-        &self,
-        env: &mut jni::Env<'a>,
-    ) -> Result<JObject<'a>, BridgeLayerError> {
-        let message = self.to_string();
+impl MessageOnlyExceptionJniError for libsignal_net_chat::api::keys::GetPreKeysFailure {
+    fn exception_class(&self) -> ClassName<'static> {
         match self {
-            Self::Unauthorized => make_single_message_throwable(
-                env,
-                message,
-                ClassName("org.signal.libsignal.net.RequestUnauthorizedException"),
-            ),
-            Self::NotFound => make_single_message_throwable(
-                env,
-                message,
-                ClassName("org.signal.libsignal.net.ServiceIdNotFoundException"),
-            ),
+            Self::Unauthorized => {
+                ClassName("org.signal.libsignal.net.RequestUnauthorizedException")
+            }
+            Self::NotFound => ClassName("org.signal.libsignal.net.ServiceIdNotFoundException"),
+        }
+    }
+}
+
+impl MessageOnlyExceptionJniError
+    for libsignal_net_chat::grpc::backups::RedeemBackupReceiptFailure
+{
+    fn exception_class(&self) -> ClassName<'static> {
+        match self {
+            Self::InvalidOrExpiredReceipt => {
+                ClassName("org.signal.libsignal.net.InvalidReceiptException")
+            }
+            Self::MissingBackupId => ClassName("org.signal.libsignal.net.MissingBackupIdException"),
         }
     }
 }
@@ -1974,34 +2000,88 @@ where
     result
 }
 
-impl JniError for libsignal_net_chat::grpc::usernames::UsernameNotSet {
-    fn to_throwable_impl<'a>(
-        &self,
-        env: &mut jni::Env<'a>,
-    ) -> Result<JObject<'a>, BridgeLayerError> {
-        let message = self.to_string();
-        make_single_message_throwable(
-            env,
-            message,
-            ClassName("org.signal.libsignal.net.UsernameNotSetException"),
-        )
+impl MessageOnlyExceptionJniError for libsignal_net_chat::grpc::usernames::UsernameNotSet {
+    fn exception_class(&self) -> ClassName<'static> {
+        ClassName("org.signal.libsignal.net.UsernameNotSetException")
     }
 }
 
-impl JniError for libsignal_net_chat::grpc::usernames::ConfirmUsernameError {
-    fn to_throwable_impl<'a>(
-        &self,
-        env: &mut jni::Env<'a>,
-    ) -> Result<JObject<'a>, BridgeLayerError> {
-        let message = self.to_string();
-        let class_name = match self {
+impl MessageOnlyExceptionJniError for libsignal_net_chat::grpc::usernames::ConfirmUsernameError {
+    fn exception_class(&self) -> ClassName<'static> {
+        match self {
             Self::ReservationNotFound => {
                 ClassName("org.signal.libsignal.net.UsernameReservationNotFoundException")
             }
             Self::UsernameNotAvailable => {
                 ClassName("org.signal.libsignal.net.UsernameNotAvailableException")
             }
-        };
-        make_single_message_throwable(env, message, class_name)
+        }
+    }
+}
+
+impl MessageOnlyExceptionJniError for libsignal_net_chat::grpc::accounts::GenerateTotpKeyError {
+    fn exception_class(&self) -> ClassName<'static> {
+        match self {
+            Self::TooManyTotpKeys => ClassName("org.signal.libsignal.net.TooManyTotpKeysException"),
+            Self::TooManyMfaKeys => ClassName("org.signal.libsignal.net.TooManyMfaKeysException"),
+        }
+    }
+}
+
+impl MessageOnlyExceptionJniError for libsignal_net_chat::grpc::accounts::ConfirmTotpKeyError {
+    fn exception_class(&self) -> ClassName<'static> {
+        match self {
+            Self::OneTimePasswordNotVerified => {
+                ClassName("org.signal.libsignal.net.MfaNotVerifiedException")
+            }
+            Self::TooManyMfaKeys => ClassName("org.signal.libsignal.net.TooManyMfaKeysException"),
+        }
+    }
+}
+
+impl MessageOnlyExceptionJniError
+    for libsignal_net_chat::grpc::accounts::StartWebAuthnRegistrationError
+{
+    fn exception_class(&self) -> ClassName<'static> {
+        match self {
+            Self::TooManyMfaKeys => ClassName("org.signal.libsignal.net.TooManyMfaKeysException"),
+        }
+    }
+}
+
+impl MessageOnlyExceptionJniError
+    for libsignal_net_chat::grpc::accounts::FinishWebAuthnRegistrationError
+{
+    fn exception_class(&self) -> ClassName<'static> {
+        match self {
+            Self::WebAuthnRegistrationUnsuccessful => {
+                ClassName("org.signal.libsignal.net.WebAuthnRegistrationUnsuccessfulException")
+            }
+            Self::TooManyMfaKeys => ClassName("org.signal.libsignal.net.TooManyMfaKeysException"),
+        }
+    }
+}
+
+impl MessageOnlyExceptionJniError for libsignal_net_chat::grpc::accounts::MfaKeyNotFound {
+    fn exception_class(&self) -> ClassName<'static> {
+        ClassName("org.signal.libsignal.net.MfaKeyNotFoundException")
+    }
+}
+
+impl MessageOnlyExceptionJniError for libsignal_net_chat::grpc::accounts::MfaVerificationFailed {
+    fn exception_class(&self) -> ClassName<'static> {
+        ClassName("org.signal.libsignal.net.MfaNotVerifiedException")
+    }
+}
+
+impl<E: JniError> JniError for crate::support::RequestOrArgumentError<E> {
+    fn to_throwable_impl<'a>(
+        &self,
+        env: &mut jni::Env<'a>,
+    ) -> Result<JObject<'a>, BridgeLayerError> {
+        match self {
+            Self::Request(e) => e.to_throwable_impl(env),
+            Self::Argument(e) => e.to_throwable_impl(env),
+        }
     }
 }

@@ -11,6 +11,7 @@ use libsignal_account_keys::{
     MEDIA_ID_LEN,
 };
 use libsignal_net_grpc::proto::chat::backup::backups_anonymous_client::BackupsAnonymousClient;
+use libsignal_net_grpc::proto::chat::backup::backups_client::BackupsClient;
 use libsignal_net_grpc::proto::chat::backup::get_upload_form_request::{
     MediaUploadType, MessagesUploadType, UploadType,
 };
@@ -19,12 +20,12 @@ use libsignal_net_grpc::proto::chat::backup::{
     DeleteMediaItem, DeleteMediaRequest, DeleteMediaResponse, GetBackupInfoRequest,
     GetCdnCredentialsRequest, GetCdnCredentialsResponse, GetMediaBackupInfoResponse,
     GetMessageBackupInfoResponse, GetSvrBCredentialsRequest, GetSvrBCredentialsResponse,
-    GetUploadFormRequest, GetUploadFormResponse, RefreshRequest, RefreshResponse,
-    SetPublicKeyRequest, SetPublicKeyResponse, SignedPresentation, backup_stream_closed,
-    copy_media_response, delete_all_response, get_cdn_credentials_response,
+    GetUploadFormRequest, GetUploadFormResponse, RedeemReceiptRequest, RedeemReceiptResponse,
+    RefreshRequest, RefreshResponse, SetPublicKeyRequest, SetPublicKeyResponse, SignedPresentation,
+    backup_stream_closed, copy_media_response, delete_all_response, get_cdn_credentials_response,
     get_media_backup_info_response, get_message_backup_info_response,
     get_svr_b_credentials_response, get_upload_form_response, list_media_response,
-    refresh_response, set_public_key_response,
+    redeem_receipt_response, refresh_response, set_public_key_response,
 };
 use libsignal_net_grpc::proto::chat::errors::{FailedPrecondition, FailedZkAuthentication};
 use libsignal_net_grpc::proto::chat::{backup as proto, common};
@@ -37,7 +38,7 @@ use crate::api::backups::{
     BackupAuth, BackupAuthCredentialRejected, BackupAuthPresentation, CdnCredentials,
     GetUploadFormFailure,
 };
-use crate::api::{RequestError, Unauth, UploadForm};
+use crate::api::{Auth, RequestError, Unauth, UploadForm};
 use crate::grpc::chunk_request;
 use crate::logging::{DebugByCalling, Redact, RedactBase64};
 
@@ -180,6 +181,14 @@ pub struct ListMediaResponse {
     pub cursor: Option<String>,
 }
 
+#[derive(Debug, displaydoc::Display)]
+pub enum RedeemBackupReceiptFailure {
+    /// Account has no backup ID
+    MissingBackupId,
+    /// Receipt credential is invalid or expired
+    InvalidOrExpiredReceipt,
+}
+
 #[async_trait]
 impl<T: GrpcServiceProvider> crate::api::backups::UnauthenticatedChatApi<OverGrpc> for Unauth<T> {
     async fn get_upload_form(
@@ -198,11 +207,12 @@ impl<T: GrpcServiceProvider> crate::api::backups::UnauthenticatedChatApi<OverGrp
             upload_type: Some(UploadType::Messages(MessagesUploadType {})),
         };
         let log_safe_description = Redact(&request).to_string();
-        let response: GetUploadFormResponse = log_and_send("unauth", &log_safe_description, || {
-            backup_service.get_upload_form(request)
-        })
-        .await?
-        .into_inner();
+        let response: GetUploadFormResponse =
+            log_and_send(Self::LOG_TAG, &log_safe_description, || {
+                backup_service.get_upload_form(request)
+            })
+            .await?
+            .into_inner();
 
         response.try_into()
     }
@@ -223,11 +233,12 @@ impl<T: GrpcServiceProvider> crate::api::backups::UnauthenticatedChatApi<OverGrp
             upload_type: Some(UploadType::Media(MediaUploadType {})),
         };
         let log_safe_description = Redact(&request).to_string();
-        let response: GetUploadFormResponse = log_and_send("unauth", &log_safe_description, || {
-            backup_service.get_upload_form(request)
-        })
-        .await?
-        .into_inner();
+        let response: GetUploadFormResponse =
+            log_and_send(Self::LOG_TAG, &log_safe_description, || {
+                backup_service.get_upload_form(request)
+            })
+            .await?
+            .into_inner();
 
         response.try_into()
     }
@@ -249,11 +260,12 @@ impl<T: GrpcServiceProvider> Unauth<T> {
             public_key: public_key.serialize().into_vec(),
         };
         let log_safe_description = Redact(&request).to_string();
-        let response: SetPublicKeyResponse = log_and_send("unauth", &log_safe_description, || {
-            backup_service.set_public_key(request)
-        })
-        .await?
-        .into_inner();
+        let response: SetPublicKeyResponse =
+            log_and_send(Self::LOG_TAG, &log_safe_description, || {
+                backup_service.set_public_key(request)
+            })
+            .await?
+            .into_inner();
 
         let response = response.response.ok_or_else(|| RequestError::Unexpected {
             log_safe: "missing response".to_owned(),
@@ -285,7 +297,7 @@ impl<T: GrpcServiceProvider> Unauth<T> {
         };
         let log_safe_description = Redact(&request).to_string();
         let response: GetCdnCredentialsResponse =
-            log_and_send("unauth", &log_safe_description, || {
+            log_and_send(Self::LOG_TAG, &log_safe_description, || {
                 backup_service.get_cdn_credentials(request)
             })
             .await?
@@ -323,7 +335,7 @@ impl<T: GrpcServiceProvider> Unauth<T> {
         };
         let log_safe_description = Redact(&request).to_string();
         let response: GetSvrBCredentialsResponse =
-            log_and_send("unauth", &log_safe_description, || {
+            log_and_send(Self::LOG_TAG, &log_safe_description, || {
                 backup_service.get_svr_b_credentials(request)
             })
             .await?
@@ -358,7 +370,7 @@ impl<T: GrpcServiceProvider> Unauth<T> {
             signed_presentation: Some(auth.into()),
         };
         let log_safe_description = Redact(&request).to_string();
-        let response: RefreshResponse = log_and_send("unauth", &log_safe_description, || {
+        let response: RefreshResponse = log_and_send(Self::LOG_TAG, &log_safe_description, || {
             backup_service.refresh(request)
         })
         .await?
@@ -391,11 +403,12 @@ impl<T: GrpcServiceProvider> Unauth<T> {
             signed_presentation: Some(auth.into()),
         };
         let log_safe_description = Redact(&request).to_string();
-        let response: DeleteAllResponse = log_and_send("unauth", &log_safe_description, || {
-            backup_service.delete_all(request)
-        })
-        .await?
-        .into_inner();
+        let response: DeleteAllResponse =
+            log_and_send(Self::LOG_TAG, &log_safe_description, || {
+                backup_service.delete_all(request)
+            })
+            .await?
+            .into_inner();
 
         let response = response.response.ok_or_else(|| RequestError::Unexpected {
             log_safe: "missing response".to_owned(),
@@ -434,7 +447,7 @@ impl<T: GrpcServiceProvider> Unauth<T> {
         };
         let log_safe_description = Redact(&request).to_string();
         let response: GetMessageBackupInfoResponse =
-            log_and_send("unauth", &log_safe_description, || {
+            log_and_send(Self::LOG_TAG, &log_safe_description, || {
                 backup_service.get_message_backup_info(request)
             })
             .await?
@@ -487,7 +500,7 @@ impl<T: GrpcServiceProvider> Unauth<T> {
         };
         let log_safe_description = Redact(&request).to_string();
         let response: GetMediaBackupInfoResponse =
-            log_and_send("unauth", &log_safe_description, || {
+            log_and_send(Self::LOG_TAG, &log_safe_description, || {
                 backup_service.get_media_backup_info(request)
             })
             .await?
@@ -567,7 +580,7 @@ impl<T: GrpcServiceProvider> Unauth<T> {
         T::Service: 'static,
     {
         send_request_with_streaming_response(
-            "unauth",
+            Self::LOG_TAG,
             service,
             || {
                 Ok(CopyMediaRequest {
@@ -680,7 +693,7 @@ impl<T: GrpcServiceProvider> Unauth<T> {
         T::Service: 'static,
     {
         send_request_with_streaming_response(
-            "unauth",
+            Self::LOG_TAG,
             service,
             || {
                 Ok(DeleteMediaRequest {
@@ -743,7 +756,7 @@ impl<T: GrpcServiceProvider> Unauth<T> {
         };
         let log_safe_description = Redact(&request).to_string();
         let response: proto::ListMediaResponse =
-            log_and_send("unauth", &log_safe_description, || {
+            log_and_send(Self::LOG_TAG, &log_safe_description, || {
                 backup_service.list_media(request)
             })
             .await?
@@ -794,6 +807,48 @@ impl<T: GrpcServiceProvider> Unauth<T> {
             }) => {
                 log::warn!("failed zk auth: {description}");
                 Err(RequestError::Other(BackupAuthCredentialRejected))
+            }
+        }
+    }
+}
+
+impl<T: GrpcServiceProvider> Auth<T> {
+    pub async fn redeem_backup_receipt(
+        &self,
+        presentation: zkgroup::receipts::ReceiptCredentialPresentation,
+    ) -> Result<(), RequestError<RedeemBackupReceiptFailure>> {
+        let mut service = BackupsClient::new(self.0.service());
+        let request = RedeemReceiptRequest {
+            presentation: zkgroup::serialize(&presentation),
+        };
+        let log_safe_description = Redact(&request).to_string();
+        let response: RedeemReceiptResponse =
+            log_and_send(Self::LOG_TAG, &log_safe_description, || {
+                service.redeem_receipt(request)
+            })
+            .await?
+            .into_inner();
+
+        let response = response.response.ok_or_else(|| RequestError::Unexpected {
+            log_safe: "missing response".to_owned(),
+        })?;
+        match response {
+            redeem_receipt_response::Response::Success(()) => Ok(()),
+            redeem_receipt_response::Response::AccountMissingCommitment(FailedPrecondition {
+                description,
+            }) => {
+                log::warn!("account missing commitment: {description}");
+                Err(RequestError::Other(
+                    RedeemBackupReceiptFailure::MissingBackupId,
+                ))
+            }
+            redeem_receipt_response::Response::InvalidReceipt(FailedPrecondition {
+                description,
+            }) => {
+                log::warn!("invalid receipt: {description}");
+                Err(RequestError::Other(
+                    RedeemBackupReceiptFailure::InvalidOrExpiredReceipt,
+                ))
             }
         }
     }
@@ -952,6 +1007,14 @@ redact_no_arg_backup_request!(GetSvrBCredentialsRequest);
 redact_no_arg_backup_request!(GetBackupInfoRequest);
 redact_no_arg_backup_request!(RefreshRequest);
 redact_no_arg_backup_request!(DeleteAllRequest);
+
+impl std::fmt::Display for Redact<RedeemReceiptRequest> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self(RedeemReceiptRequest { presentation: _ }) = self;
+        f.debug_struct("RedeemReceiptRequest")
+            .finish_non_exhaustive()
+    }
+}
 
 // Not cfg(test) so it can be accessed via bridging tests.
 pub mod test_cases {
@@ -1305,6 +1368,34 @@ pub mod test_cases {
             presentation: BackupAuth::EXPECTED_TEST_PRESENTATION.to_vec(),
             presentation_signature: BackupAuth::EXPECTED_TEST_SIGNATURE.to_vec(),
         }
+    }
+
+    /// A structurally-valid receipt credential presentation.
+    ///
+    /// Our tests never actually verify these presentations, so it's fine that the server params are synthetic.
+    fn test_backup_receipt_credential_presentation()
+    -> zkgroup::receipts::ReceiptCredentialPresentation {
+        let server_keys =
+            zkgroup::server_params::ServerSecretParams::generate([b's'; zkgroup::RANDOMNESS_LEN]);
+        let server_public = server_keys.get_public_params();
+
+        let context = server_public.create_receipt_credential_request_context(
+            [b'r'; zkgroup::RANDOMNESS_LEN],
+            [b'r'; zkgroup::RECEIPT_SERIAL_LEN],
+        );
+        let request = context.get_request();
+        let expiration = zkgroup::Timestamp::from_epoch_seconds(1771545600); // 2026-02-20 00:00
+        let response = server_keys.issue_receipt_credential(
+            [b'i'; zkgroup::RANDOMNESS_LEN],
+            &request,
+            expiration,
+            200,
+        );
+        let credential = server_public
+            .receive_receipt_credential(&context, &response)
+            .expect("valid");
+        server_public
+            .create_receipt_credential_presentation([b'p'; zkgroup::RANDOMNESS_LEN], &credential)
     }
 
     #[derive(Debug)]
@@ -1969,6 +2060,76 @@ pub mod test_cases {
             },
         ]
     }
+
+    pub enum RedeemBackupReceiptOut {
+        Success,
+        InvalidReceipt,
+        MissingBackupId,
+        MissingResponse,
+    }
+
+    pub fn redeem_receipt_test_cases() -> Vec<
+        GrpcTestCase<
+            zkgroup::receipts::ReceiptCredentialPresentation,
+            RedeemReceiptRequest,
+            RedeemReceiptResponse,
+            RedeemBackupReceiptOut,
+        >,
+    > {
+        let method = "/org.signal.chat.backup.Backups/RedeemReceipt";
+        let presentation = test_backup_receipt_credential_presentation();
+        let request_grpc = RedeemReceiptRequest {
+            presentation: zkgroup::serialize(&presentation),
+        };
+        vec![
+            GrpcTestCase {
+                name: "success".to_owned(),
+                method: method.to_owned(),
+                request: presentation.clone(),
+                request_grpc: request_grpc.clone(),
+                response_grpc: RedeemReceiptResponse {
+                    response: Some(redeem_receipt_response::Response::Success(())),
+                },
+                response: RedeemBackupReceiptOut::Success,
+            },
+            GrpcTestCase {
+                name: "credential rejected".to_owned(),
+                method: method.to_owned(),
+                request: presentation.clone(),
+                request_grpc: request_grpc.clone(),
+                response_grpc: RedeemReceiptResponse {
+                    response: Some(redeem_receipt_response::Response::InvalidReceipt(
+                        FailedPrecondition {
+                            description: "bad!".to_owned(),
+                        },
+                    )),
+                },
+                response: RedeemBackupReceiptOut::InvalidReceipt,
+            },
+            GrpcTestCase {
+                name: "missing ID".to_owned(),
+                method: method.to_owned(),
+                request: presentation.clone(),
+                request_grpc: request_grpc.clone(),
+                response_grpc: RedeemReceiptResponse {
+                    response: Some(redeem_receipt_response::Response::AccountMissingCommitment(
+                        FailedPrecondition {
+                            description: "no ID".to_owned(),
+                        },
+                    )),
+                },
+                response: RedeemBackupReceiptOut::MissingBackupId,
+            },
+            GrpcTestCase {
+                name: "missing response".to_owned(),
+                method: method.to_owned(),
+                request: presentation,
+                request_grpc,
+                response_grpc: RedeemReceiptResponse { response: None },
+                response: RedeemBackupReceiptOut::MissingResponse,
+            },
+        ]
+    }
 }
 
 #[cfg(test)]
@@ -1987,6 +2148,7 @@ mod test {
 
     use super::test_cases::backup_stream_unauthorized;
     use super::*;
+    use crate::api::DisconnectedError;
     use crate::api::backups::UnauthenticatedChatApi;
     use crate::api::testutil::fixed_seed_test_rng;
     use crate::grpc::test_case_util::stream;
@@ -2046,7 +2208,7 @@ mod test {
     #[test_case(ok(GetUploadFormResponse {
         response: None,
     }) => matches Err(RequestError::Unexpected { .. }))]
-    #[test_case(err(tonic::Code::Internal) => matches Err(RequestError::Unexpected { .. }))]
+    #[test_case(err(tonic::Code::Internal) => matches Err(RequestError::Disconnected(DisconnectedError::Transport { .. })))]
     fn test_get_upload_form(
         response: http::Response<BodyWithTrailers>,
     ) -> Result<UploadForm, RequestError<GetUploadFormFailure>> {
@@ -2110,7 +2272,7 @@ mod test {
     #[test_case(ok(GetUploadFormResponse {
         response: None,
     }) => matches Err(RequestError::Unexpected { .. }))]
-    #[test_case(err(tonic::Code::Internal) => matches Err(RequestError::Unexpected { .. }))]
+    #[test_case(err(tonic::Code::Internal) => matches Err(RequestError::Disconnected(DisconnectedError::Transport { .. })))]
     fn test_get_media_upload_form(
         response: http::Response<BodyWithTrailers>,
     ) -> Result<UploadForm, RequestError<GetUploadFormFailure>> {
@@ -2813,6 +2975,40 @@ mod test {
                     )
                 }
                 ListMediaOut::MissingResponse => {
+                    assert_matches!(
+                        result,
+                        Err(RequestError::Unexpected { log_safe }) if log_safe == "missing response"
+                    )
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn test_redeem_receipt() {
+        use super::test_cases::*;
+        run_tests(
+            redeem_receipt_test_cases(),
+            |chat: Auth<_>, presentation| async move { chat.redeem_backup_receipt(presentation).await },
+            |resp, result| match resp {
+                RedeemBackupReceiptOut::Success => result.expect("success"),
+                RedeemBackupReceiptOut::InvalidReceipt => {
+                    assert_matches!(
+                        result,
+                        Err(RequestError::Other(
+                            RedeemBackupReceiptFailure::InvalidOrExpiredReceipt
+                        ))
+                    )
+                }
+                RedeemBackupReceiptOut::MissingBackupId => {
+                    assert_matches!(
+                        result,
+                        Err(RequestError::Other(
+                            RedeemBackupReceiptFailure::MissingBackupId
+                        ))
+                    )
+                }
+                RedeemBackupReceiptOut::MissingResponse => {
                     assert_matches!(
                         result,
                         Err(RequestError::Unexpected { log_safe }) if log_safe == "missing response"

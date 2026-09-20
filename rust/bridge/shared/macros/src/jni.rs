@@ -7,6 +7,7 @@ use heck::ToLowerCamelCase;
 use itertools::Itertools;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::*;
+use syn::fold::Fold as _;
 use syn::spanned::Spanned as _;
 use syn::*;
 use syn_mid::Signature;
@@ -32,16 +33,20 @@ pub(crate) fn bridge_fn(
 
     let input_names_and_types = extract_arg_names_and_types(sig)?;
 
-    let input_args = input_names_and_types
-        .iter()
-        .map(|(name, ty)| quote!(#name: jni_arg_type!(#ty)));
+    let input_args = input_names_and_types.iter().map(|&(name, ty)| {
+        let local_ty = ApplyLocalLifetime(parse_quote!('local)).fold_type(ty.clone());
+        quote!(#name: <#local_ty as #krate::jni::ArgTypeInfo<'local, 'local, 'local>>::ArgType)
+    });
 
     let mut jni_function_args = input_names_and_types
         .iter()
-        .map(|(name, arg)| {
+        .map(|&(name, ty)| {
             quote!((
                 stringify!(#name).to_string(),
-                <jni_arg_type!(#arg) as #krate::jni::HasKtSpelling>::register_kt_spelling(ctx),
+                <
+                    <#ty as #krate::jni::ArgTypeInfo<'_, '_, '_>>::ArgType
+                    as #krate::jni::HasKtSpelling
+                >::register_kt_spelling(ctx),
             ))
         })
         .collect_vec();
@@ -56,23 +61,33 @@ pub(crate) fn bridge_fn(
                     format_args!("non-async function '{}' cannot use #[bridge_io]", sig.ident),
                 ));
             }
-            jni_function_args.insert(0, quote!((
-                "async_runtime".to_string(),
-                <jni_arg_type!(&#runtime) as #krate::jni::HasKtSpelling>::register_kt_spelling(ctx),
-            )));
-            quote!(async_runtime: jni_arg_type!(&#runtime),) // Note the trailing comma!
+            jni_function_args.insert(
+                0,
+                quote!((
+                    "async_runtime".to_string(),
+                    <
+                        <&#runtime as #krate::jni::ArgTypeInfo<'_, '_, '_>>::ArgType
+                        as #krate::jni::HasKtSpelling
+                    >::register_kt_spelling(ctx),
+                )),
+            );
+            quote!(async_runtime: <&'local #runtime as #krate::jni::ArgTypeInfo<'local, 'local, 'local>>::ArgType,) // Note the trailing comma!
         }
     };
 
     let output = result_type(&sig.output);
     let mut is_throwing = ResultInfo::from(&sig.output).failable;
     let result_ty = match bridging_kind {
-        BridgingKind::Regular => quote!(jni_result_type!(#output)),
+        BridgingKind::Regular => {
+            quote!(<#output as jni::ResultTypeDeclInfo<'_>>::ResultType)
+        }
         BridgingKind::Io { .. } => {
             is_throwing = false;
-            quote!(jni::JavaCompletableFuture<'local, jni_result_type!(#output)>)
+            quote!(jni::JavaCompletableFuture<'_, <#output as jni::ResultTypeDeclInfo<'_>>::ResultType>)
         }
     };
+    let explicitly_local_lifetime_output =
+        ApplyLocalLifetime(syn::parse_quote!('local)).fold_type(syn::parse2(result_ty.clone())?);
 
     let body = match bridging_kind {
         BridgingKind::Regular => {
@@ -106,7 +121,7 @@ pub(crate) fn bridge_fn(
             _class: ::jni::objects::JClass,
             #async_runtime_if_needed
             #(#input_args),*
-        ) -> #result_ty {
+        ) -> #explicitly_local_lifetime_output {
             let _trace = libsignal_debug::trace_block!(concat!("bridge::", #name));
             #body
         }
@@ -117,8 +132,7 @@ pub(crate) fn bridge_fn(
             #krate::metadata::FnWithModule {
                 module_path: module_path!(),
                 apply: |ctx| {
-                    // We need to provide a lifetime named 'local to support jni_arg_type! et al
-                    fn inner<'local>(ctx: &mut #krate::metadata::jni::KtMetadataContext) {
+                    fn inner(ctx: &mut #krate::metadata::jni::KtMetadataContext) {
                         let args = vec![#(#jni_function_args),*];
                         let result = <#result_ty as #krate::jni::HasKtSpelling>::register_kt_spelling(ctx);
                         #krate::metadata::insert_checked(
@@ -135,6 +149,26 @@ pub(crate) fn bridge_fn(
                 },
             };
     })
+}
+
+struct ApplyLocalLifetime(syn::Lifetime);
+
+impl syn::fold::Fold for ApplyLocalLifetime {
+    fn fold_type_reference(&mut self, i: syn::TypeReference) -> syn::TypeReference {
+        if i.lifetime.is_none() {
+            syn::TypeReference {
+                lifetime: Some(self.0.clone()),
+                elem: Box::new(self.fold_type(*i.elem)),
+                ..i
+            }
+        } else {
+            i
+        }
+    }
+
+    fn fold_lifetime(&mut self, i: syn::Lifetime) -> syn::Lifetime {
+        if i.ident == "_" { self.0.clone() } else { i }
+    }
 }
 
 fn generate_code_to_load_input(name: impl IdentFragment, ty: impl ToTokens) -> TokenStream2 {
@@ -393,8 +427,10 @@ fn bridge_callback_item(item: &TraitItem, wrapper_name: &Ident) -> Result<Callba
                         jni::JniArgs {
                             sig: __signature.method_signature(),
                             args: [#(jni::JValue::from(&#converted_args)),*],
-                            // Some result types have 'local in them, so we have to provide that lifetime here.
-                            _return: std::marker::PhantomData::<for<'local> fn(&'local ()) -> jni_arg_type!(#result_ty)>,
+                            _return: std::marker::PhantomData::<
+                                // Some result types have 'local in them, so we have to provide that lifetime here.
+                                for<'local> fn(&'local ()) -> <#result_ty as jni::CallbackResultTypeDeclInfo<'local>>::ResultType
+                            >,
                         }
                     )?;
                     jni::CallbackResultTypeInfo::convert_from_callback(env, __result)
@@ -487,9 +523,11 @@ fn derive_bridged_as_value_arg(
     } = DeriveInputInfo::new(input, target);
     impl_arg_type_info
         .extra_where
-        .extend(field_types.iter().flatten().map(|ty|parse_quote!(
-            #ty: #krate::jni::ArgTypeInfo<'storage, 'param, 'context/*, ArgType=#krate::jni_arg_type!(#ty)*/>
-        )));
+        .extend(field_types.iter().flatten().map(|ty| {
+            parse_quote!(
+                #ty: #krate::jni::ArgTypeInfo<'storage, 'param, 'context>
+            )
+        }));
     let mut impl_nice_arg_converter = Impl::new(
         input,
         target,

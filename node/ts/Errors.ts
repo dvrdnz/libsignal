@@ -81,9 +81,14 @@ export enum ErrorCode {
 
   UploadTooLarge,
 
+  RegisterAccountRequestRejected,
   RegistrationCredentialsCouldNotBeParsed,
   RegistrationDeviceTransferPossibleNotSkipped,
+  RegistrationInvalidReceipt,
+  RegistrationInvalidSession,
   RegistrationLock,
+  RegistrationOneTimePasswordRequired,
+  RegistrationRecoveryPasswordRequired,
   RegistrationRecoveryVerificationFailed,
   RegistrationRequestInvalid,
   RegistrationRequestRejected,
@@ -96,6 +101,21 @@ export enum ErrorCode {
   UsernameNotAvailable,
   UsernameNotSet,
   UsernameReservationNotFound,
+
+  InvalidReceipt,
+  MissingBackupId,
+
+  ReceiptCredentialErrorPaymentStillProcessing,
+  ReceiptCredentialErrorPaymentRequired,
+  ReceiptCredentialErrorPaymentNotFound,
+  ReceiptCredentialErrorReceiptAlreadyIssued,
+  TooManyTotpKeys,
+  TooManyMfaKeys,
+  MfaNotVerified,
+  /** @deprecated Use {@link MfaNotVerified} instead. */
+  OneTimePasswordNotVerified = MfaNotVerified,
+  MfaKeyNotFound,
+  WebAuthnRegistrationUnsuccessful,
 }
 
 /** Called out as a separate type so it's not confused with a normal ServiceIdBinary. */
@@ -138,11 +158,26 @@ export class MismatchedDevicesEntry {
   }
 }
 
+export type PaymentProvider =
+  | 'googlePlayBilling'
+  | 'appleAppStore'
+  | 'stripe'
+  | 'braintree';
+export type ChargeFailure = {
+  processor: PaymentProvider;
+  code: string;
+  message: string;
+  outcomeNetworkStatus: string | null;
+  outcomeReason: string | null;
+  outcomeType: string | null;
+};
+
 export class LibSignalErrorBase extends Error {
   public readonly code: ErrorCode;
   public readonly operation: string;
   readonly _addr?: string | Native.ProtocolAddress;
   readonly _sessionState?: Native.RegistrationSession;
+  readonly _chargeFailure?: ChargeFailure | null;
 
   constructor(
     message: string,
@@ -193,6 +228,12 @@ export class LibSignalErrorBase extends Error {
     );
   }
 
+  public get chargeFailure(): ChargeFailure | null {
+    if (this._chargeFailure === undefined)
+      throw new TypeError(`cannot get ChargeFailure from this error (${this})`);
+    return this._chargeFailure;
+  }
+
   public toString(): string {
     return `${this.name} - ${this.operation}: ${this.message}`;
   }
@@ -217,7 +258,10 @@ export class LibSignalErrorBase extends Error {
   }
 }
 
-export type LibSignalErrorCommon = Omit<LibSignalErrorBase, 'addr'>;
+export type LibSignalErrorCommon = Omit<
+  LibSignalErrorBase,
+  'addr' | 'chargeFailure'
+>;
 
 export type GenericError = LibSignalErrorCommon & {
   code: ErrorCode.Generic;
@@ -479,15 +523,35 @@ export type RegistrationDeviceTransferPossibleNotSkippedError =
     code: ErrorCode.RegistrationDeviceTransferPossibleNotSkipped;
   };
 
+export type RegistrationOneTimePasswordRequiredError = LibSignalErrorCommon & {
+  code: ErrorCode.RegistrationOneTimePasswordRequired;
+};
+
+export type RegistrationRecoveryPasswordRequiredError = LibSignalErrorCommon & {
+  code: ErrorCode.RegistrationRecoveryPasswordRequired;
+};
+
 export type RegistrationRecoveryVerificationFailedError =
   LibSignalErrorCommon & {
     code: ErrorCode.RegistrationRecoveryVerificationFailed;
   };
 
+export type RegisterAccountRequestRejectedError = LibSignalErrorCommon & {
+  code: ErrorCode.RegisterAccountRequestRejected;
+};
+
 export type RegistrationCredentialsCouldNotBeParsedError =
   LibSignalErrorCommon & {
     code: ErrorCode.RegistrationCredentialsCouldNotBeParsed;
   };
+
+export type RegistrationInvalidSessionError = LibSignalErrorCommon & {
+  code: ErrorCode.RegistrationInvalidSession;
+};
+
+export type RegistrationInvalidReceiptError = LibSignalErrorCommon & {
+  code: ErrorCode.RegistrationInvalidReceipt;
+};
 
 export type DeviceIdNotFound = LibSignalErrorCommon & {
   code: ErrorCode.DeviceIdNotFound;
@@ -507,6 +571,7 @@ export type StandardNetworkError =
   | ChatServiceInactive
   | IoError
   | RateLimitedError;
+
 export type UsernameNotSet = LibSignalErrorCommon & {
   code: ErrorCode.UsernameNotSet;
 };
@@ -514,6 +579,52 @@ export type UsernameNotSet = LibSignalErrorCommon & {
 export type UsernameReservationNotFound = LibSignalErrorCommon & {
   code: ErrorCode.UsernameReservationNotFound;
 };
+
+export type InvalidReceiptError = LibSignalErrorCommon & {
+  code: ErrorCode.InvalidReceipt;
+};
+
+export type MissingBackupId = LibSignalErrorCommon & {
+  code: ErrorCode.MissingBackupId;
+};
+
+export type ReceiptCredentialErrorPaymentStillProcessing =
+  LibSignalErrorCommon & {
+    code: ErrorCode.ReceiptCredentialErrorPaymentStillProcessing;
+  };
+export type ReceiptCredentialErrorPaymentRequired = LibSignalErrorCommon & {
+  code: ErrorCode.ReceiptCredentialErrorPaymentRequired;
+  readonly chargeFailure: ChargeFailure | null;
+};
+export type ReceiptCredentialErrorPaymentNotFound = LibSignalErrorCommon & {
+  code: ErrorCode.ReceiptCredentialErrorPaymentNotFound;
+};
+export type ReceiptCredentialErrorReceiptAlreadyIssued =
+  LibSignalErrorCommon & {
+    code: ErrorCode.ReceiptCredentialErrorReceiptAlreadyIssued;
+  };
+export type TooManyTotpKeys = LibSignalErrorCommon & {
+  code: ErrorCode.TooManyTotpKeys;
+};
+
+export type TooManyMfaKeys = LibSignalErrorCommon & {
+  code: ErrorCode.TooManyMfaKeys;
+};
+
+export type MfaNotVerified = LibSignalErrorCommon & {
+  code: ErrorCode.MfaNotVerified;
+};
+/** @deprecated Use {@link MfaNotVerified} instead. */
+export type OneTimePasswordNotVerified = MfaNotVerified;
+
+export type MfaKeyNotFound = LibSignalErrorCommon & {
+  code: ErrorCode.MfaKeyNotFound;
+};
+
+export type WebAuthnRegistrationUnsuccessful = LibSignalErrorCommon & {
+  code: ErrorCode.WebAuthnRegistrationUnsuccessful;
+};
+
 export type LibSignalError =
   | GenericError
   | DuplicatedMessageError
@@ -576,9 +687,25 @@ export type LibSignalError =
   | RegistrationVerificationCodeNotDeliverableError
   | RegistrationLockError
   | RegistrationDeviceTransferPossibleNotSkippedError
+  | RegistrationOneTimePasswordRequiredError
+  | RegistrationRecoveryPasswordRequiredError
   | RegistrationRecoveryVerificationFailedError
+  | RegisterAccountRequestRejectedError
   | RegistrationCredentialsCouldNotBeParsedError
+  | RegistrationInvalidSessionError
+  | RegistrationInvalidReceiptError
   | DeviceIdNotFound
   | UsernameNotAvailable
   | UsernameNotSet
-  | UsernameReservationNotFound;
+  | UsernameReservationNotFound
+  | InvalidReceiptError
+  | MissingBackupId
+  | ReceiptCredentialErrorPaymentStillProcessing
+  | ReceiptCredentialErrorPaymentRequired
+  | ReceiptCredentialErrorPaymentNotFound
+  | ReceiptCredentialErrorReceiptAlreadyIssued
+  | TooManyTotpKeys
+  | TooManyMfaKeys
+  | MfaNotVerified
+  | MfaKeyNotFound
+  | WebAuthnRegistrationUnsuccessful;
