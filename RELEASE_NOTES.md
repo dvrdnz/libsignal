@@ -1,11 +1,3 @@
-v0.103.0
+v0.103.1
 
-- SPQR: Update to v1.6.0.
-- Renamed OneTimePasswordNotVerified error to MfaNotVerified in preparation for broader use.
-- Key transparency is now available over gRPC
-- New typed APIs:
-    - AuthAccountsService.startWebAuthnRegistration
-    - AuthAccountsService.finishWebAuthnRegistration
-    - AuthAccountsService.startMfaVerification
-    - AuthAccountsService.finishMfaVerification
-- Upgrade {webp,mp4}san to 0.5.4
+- Swift: BackupJsonExporter is now available

@@ -308,13 +308,13 @@ impl NiceArgConverter for Vec<u8> {
     }
 }
 
-impl ArgTypeInfoBase for Vec<&'_ [u8]> {
+impl ArgTypeInfoBase for &'_ [&'_ [u8]] {
     type ArgType = BorrowedSliceOf<BorrowedSliceOf<u8>>;
 }
-impl<'a> ArgTypeInfo<'a> for Vec<&'a [u8]> {
+impl<'a> ArgTypeInfo<'a> for &'a [&'a [u8]] {
     type StoredType = Vec<&'a [u8]>;
 
-    fn borrow(foreign: Self::ArgType) -> SignalFfiResult<Self> {
+    fn borrow(foreign: Self::ArgType) -> SignalFfiResult<Self::StoredType> {
         let slices = unsafe { foreign.as_slice()? };
         slices
             .iter()
@@ -335,7 +335,7 @@ impl<'a> ArgTypeInfo<'a> for Vec<&'a [u8]> {
     }
 
     fn load_from(stored: &'a mut Self::StoredType) -> Self {
-        std::mem::take(stored)
+        stored
     }
 }
 
@@ -1783,6 +1783,23 @@ impl<A: NiceResultConverter + ResultTypeInfo, B: NiceResultConverter + ResultTyp
     }
 }
 
+impl<A: ResultTypeInfo, B: ResultTypeInfo> ResultTypeInfo for Vec<(A, B)> {
+    type ResultType = <BridgeVec<(A, B)> as ResultTypeInfo>::ResultType;
+
+    fn convert_into(self) -> SignalFfiResult<Self::ResultType> {
+        BridgeVec(self).convert_into()
+    }
+}
+
+#[cfg(feature = "metadata")]
+impl<A: NiceResultConverter + ResultTypeInfo, B: NiceResultConverter + ResultTypeInfo>
+    NiceResultConverter for Vec<(A, B)>
+{
+    fn register_swift_result_converter(ctx: &mut SwiftMetadataContext) -> SwiftReturnConverter {
+        <BridgeVec<(A, B)>>::register_swift_result_converter(ctx)
+    }
+}
+
 impl<A: ResultTypeInfo, B: ResultTypeInfo> ResultTypeInfo for Option<(A, B)>
 where
     A::ResultType: Default,
@@ -2024,6 +2041,21 @@ macro_rules! ffi_bridge_as_handle {
                         nice_type: $swift_type.into(),
                         converter_type: format!(
                             "BridgeHandleRefConverter<SignalMutPointer{}, {}>",
+                            stringify!($typ),
+                            $swift_type,
+                        ),
+                    }
+                }
+            }
+            #[cfg(feature = "metadata")]
+            impl $crate::ffi::NiceArgConverter for &mut $typ {
+                fn register_swift_arg_converter(
+                    _ctx: &mut $crate::metadata::ffi::SwiftMetadataContext
+                ) -> $crate::metadata::ffi::SwiftArgConverter {
+                    $crate::metadata::ffi::SwiftArgConverter {
+                        nice_type: $swift_type.into(),
+                        converter_type: format!(
+                            "BridgeHandleMutRefConverter<SignalMutPointer{}, {}>",
                             stringify!($typ),
                             $swift_type,
                         ),

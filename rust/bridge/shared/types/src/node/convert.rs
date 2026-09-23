@@ -1296,27 +1296,33 @@ impl<'a> AsyncArgTypeInfo<'a> for crate::support::ServiceIdSequence<'a> {
     register_ts_ffi_type!("Uint8Array<ArrayBuffer>");
 }
 
-impl<'storage, 'context: 'storage> ArgTypeInfo<'storage, 'context> for Vec<&'storage [u8]> {
+impl<'storage, 'context: 'storage> ArgTypeInfo<'storage, 'context>
+    for &'storage [&'storage [u8]]
+{
     type ArgType = JsArray;
-    type StoredType = Vec<AssumedImmutableBuffer<'context>>;
+    type StoredType = (Vec<AssumedImmutableBuffer<'context>>, Vec<&'storage [u8]>);
 
     fn borrow(
         cx: &mut FunctionContext<'context>,
         foreign: Handle<'context, Self::ArgType>,
     ) -> NeonResult<Self::StoredType> {
         let count = foreign.len(cx);
-        (0..count)
-            .map(|i| {
-                let next = foreign.get(cx, i)?;
-                Ok(AssumedImmutableBuffer::new(cx, next))
-            })
-            .collect()
+        let mut checked_buffers = Vec::with_capacity(count.try_into().expect("32-bit sizes"));
+        // This is a second copy of the storage with the hashes dropped. That's not very
+        // efficient, but it's not likely to be a performance bottleneck either.
+        let mut unchecked_buffers = Vec::with_capacity(count.try_into().expect("32-bit sizes"));
+        for i in 0..count {
+            let next = foreign.get(cx, i)?;
+            let checked_buffer = AssumedImmutableBuffer::new(cx, next);
+            let unchecked_buffer = checked_buffer.buffer;
+            checked_buffers.push(checked_buffer);
+            unchecked_buffers.push(unchecked_buffer);
+        }
+        Ok((checked_buffers, unchecked_buffers))
     }
 
     fn load_from(stored: &'storage mut Self::StoredType) -> Self {
-        // This effectively makes a copy of the storage with the hashes dropped. That's not very
-        // efficient, but it's not likely to be a performance bottleneck either.
-        stored.iter().map(|buffer| buffer as &[u8]).collect()
+        &stored.1
     }
     register_ts_ffi_type!("Array<Uint8Array<ArrayBuffer>>");
 }

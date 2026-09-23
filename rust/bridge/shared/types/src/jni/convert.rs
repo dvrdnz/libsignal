@@ -1050,13 +1050,16 @@ impl<'storage, 'param: 'storage, 'context: 'param> ArgTypeInfo<'storage, 'param,
 /// having to "release" it afterwards; as long as the object is live, the storage is valid. By
 /// contrast, `byte[][]` can't have all of its elements borrowed at once, because the `jni` crate is
 /// strict about the lifetimes for that.
-impl<'a> SimpleArgTypeInfo<'a> for Vec<&'a [u8]> {
-    type ArgType = JavaByteBufferArray<'a>;
+impl<'storage, 'param: 'storage, 'context: 'param> ArgTypeInfo<'storage, 'param, 'context>
+    for &'storage [&'storage [u8]]
+{
+    type StoredType = Vec<&'storage [u8]>;
+    type ArgType = JavaByteBufferArray<'context>;
 
-    fn convert_from(
-        env: &mut jni::Env<'a>,
+    fn borrow(
+        env: &mut jni::Env<'context>,
         JavaByteBufferArray(foreign): &Self::ArgType,
-    ) -> Result<Self, BridgeLayerError> {
+    ) -> Result<Self::StoredType, BridgeLayerError> {
         #[derive(derive_more::From)]
         enum JniErrorOrNull {
             Jni(#[from] jni::errors::Error),
@@ -1083,10 +1086,14 @@ impl<'a> SimpleArgTypeInfo<'a> for Vec<&'a [u8]> {
         })
         .or_else(|e| match e {
             JniErrorOrNull::Jni(jni_error) => {
-                Err(jni_error).check_exceptions(env, "Vec<&[u8]>::convert_from")
+                Err(jni_error).check_exceptions(env, "<&[&[u8]]>::convert_from")
             }
             JniErrorOrNull::Null(message) => Err(BridgeLayerError::null_pointer(Some(message))),
         })
+    }
+
+    fn load_from(stored: &'storage mut Self::StoredType) -> Self {
+        stored
     }
 }
 
